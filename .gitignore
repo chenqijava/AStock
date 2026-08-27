@@ -1,0 +1,16 @@
+# ─── 密钥/凭证：禁止提交 ───────────────────────────────
+# TG bot token + chat_id（敏感！）
+tg_config.json
+
+# ─── 每日循环状态与日志 ────────────────────────────────
+daily_loop_state.json
+daily_loop.log
+
+# ─── 实盘台账/成交/信号：个人持仓数据，勿入库 ──────────
+panic_positions.json
+signals_*.csv
+fills_*.csv
+
+# ─── Python 缓存 ──────────────────────────────────────
+__pycache__/
+*.pyc
