@@ -17,6 +17,12 @@ panic_positions.json
 signals_*.csv
 fills_*.csv
 
+# ─── 行情数据目录：体积大且可重新下载，不入库 ──────────
+# 不复权日线 / 后复权日线 / 退市股后复权
+a_share_daily/
+a_share_daily_hfq/
+a_share_delisted_hfq/
+
 # ─── Python 缓存 ──────────────────────────────────────
 __pycache__/
 *.pyc
