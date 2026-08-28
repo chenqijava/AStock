@@ -7,23 +7,23 @@ daily_loop.py — 实盘每日定时循环: 每天 16:00 自动更新数据并�
   1. 更新数据   update_a_share_daily.py --day <今天> --output a_share_daily
                 (今天数据若尚未发布, 每 --retry-interval 重试, 最迟 --retry-until)
   2. 验证今天数据已入库(以 sh.600000.csv 末尾日期为准)
-  3. 生成信号并推送   signal_panic.py --pp --sc [--tg]  (报告推到微信/TG)
+  3. 生成信号并推送   signal_panic.py --sc [--pp --tg]  (报告推到微信/TG)
   4. 记录"今日已完成", 睡到明天
 
 非交易日自动跳过(不发消息)。已完成日期存 daily_loop_state.json,
 重启不重复执行。适合开机自启 / Windows 任务计划长时间挂着。
 
-推送通道(默认开): 微信 PushPlus + 微信 Server酱; TG 默认关。
---no-pp / --no-sc 关对应微信, --tg 加开 TG。可任意组合。
+推送通道: 微信 Server酱(默认开) + PushPlus(--pp 开) + TG(--tg 开)。
+--no-sc 关 Server酱。可任意组合。
 
 用法
 ----
-    python daily_loop.py                    # 长期运行(默认两个微信都推)
+    python daily_loop.py                    # 长期运行(默认推 Server酱)
     python daily_loop.py --once             # 立即跑一次今天(手动/测试)
     python daily_loop.py --time 16:00       # 改定时(默认 16:00)
     python daily_loop.py --retry-until 20:00
-    python daily_loop.py --tg              # 两微信 + TG 都推
-    python daily_loop.py --no-pp --no-sc   # 不推微信(只更新+生成信号)
+    python daily_loop.py --tg --pp         # 三个通道都推
+    python daily_loop.py --no-sc           # 不推微信(只更新+生成信号)
 """
 import argparse
 import datetime as _dt
@@ -301,9 +301,9 @@ def main() -> None:
                     help="Server酱 配置文件")
     ap.add_argument("--state", default=STATE_FILE, help="状态文件")
     ap.add_argument("--tg", action="store_true",
-                    help="同时推送到 Telegram(默认关; 微信默认开)")
-    ap.add_argument("--pp", dest="pp", action="store_true", default=True,
-                    help="推送到微信(PushPlus, 默认开; --no-pp 关)")
+                    help="同时推送到 Telegram(默认关)")
+    ap.add_argument("--pp", dest="pp", action="store_true",
+                    help="推送到微信(PushPlus, 默认关; 加 --pp 开)")
     ap.add_argument("--no-pp", dest="pp", action="store_false",
                     help="不推送到 PushPlus")
     ap.add_argument("--sc", dest="sc", action="store_true", default=True,

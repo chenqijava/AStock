@@ -53,8 +53,8 @@ stop_price(建仓时按当时 stop_pct 锁定)。出场判定按台账+最新数
     python signal_panic.py --list                       # 查看当前持仓与浮盈亏
     python signal_panic.py --buy-fills fb.csv --sell-fills fs.csv  # 回填当日成交
     python signal_panic.py --panic-threshold 50 --capital 2000000
-    python signal_panic.py --tg            # 报告推到 Telegram 群(默认推两个微信)
-    python signal_panic.py --no-pp         # 不推 PushPlus(只本地+Server酱)
+    python signal_panic.py --tg            # 报告推到 Telegram 群(默认只推 Server酱)
+    python signal_panic.py --pp           # 加推 PushPlus
     python signal_panic.py --no-sc         # 不推 Server酱
 
 买入成交CSV(fills_buy.csv, 每行): date,code,price[,shares]
@@ -292,8 +292,8 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="只查看持仓与浮盈亏，不生成信号")
     ap.add_argument("--tg", action="store_true", help="跑完把报告推送到 Telegram 群(tg_config.json)")
     ap.add_argument("--tg-config", default="tg_config.json", help="TG 配置文件(json)")
-    ap.add_argument("--pp", dest="pp", action="store_true", default=True,
-                    help="跑完把报告推送到微信(PushPlus, 默认开; --no-pp 关)")
+    ap.add_argument("--pp", dest="pp", action="store_true",
+                    help="跑完把报告推送到微信(PushPlus, 默认关; 加 --pp 开)")
     ap.add_argument("--no-pp", dest="pp", action="store_false",
                     help="不推送到微信(PushPlus)")
     ap.add_argument("--pp-config", default="pushplus_config.json", help="PushPlus 配置文件(json)")
