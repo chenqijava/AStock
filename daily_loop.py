@@ -241,10 +241,10 @@ def mark_done(args, day: str, note: str) -> None:
 
 
 def loop(args) -> None:
-    state = load_state(args.state)
     while True:
         now = _dt.datetime.now()
         today = now.date().isoformat()
+        state = load_state(args.state)          # 每轮重读: mark_done 只写磁盘不回写本变量
 
         if state.get("done") == today and not args.force:
             if args.once:
