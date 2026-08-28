@@ -7,21 +7,25 @@ daily_loop.py — 实盘每日定时循环: 每天 16:00 自动更新数据并�
   1. 更新数据   update_a_share_daily.py --day <今天> --output a_share_daily
                 (今天数据若尚未发布, 每 --retry-interval 重试, 最迟 --retry-until)
   2. 验证今天数据已入库(以 sh.600000.csv 末尾日期为准)
-  3. 生成信号并推送   signal_panic.py --sc [--pp --tg]  (报告推到微信/TG)
-  4. 记录"今日已完成", 睡到明天
+  3. 补后复权   update_a_share_daily_hfq.py --day <今天> --output a_share_daily_hfq
+                (信号指标用后复权, 与回测口径一致; 执行价仍走不复权真实价)
+  4. 生成信号并推送   signal_panic.py --data a_share_daily_hfq --sc [--pp --tg]
+  5. 记录"今日已完成", 睡到明天
 
 非交易日自动跳过(不发消息)。已完成日期存 daily_loop_state.json,
 重启不重复执行。适合开机自启 / Windows 任务计划长时间挂着。
+hfq 更新失败时自动回落: 信号改用不复权数据, 流程不中断(--no-hfq 可关闭该步骤)。
 
 推送通道: 微信 Server酱(默认开) + PushPlus(--pp 开) + TG(--tg 开)。
 --no-sc 关 Server酱。可任意组合。
 
 用法
 ----
-    python daily_loop.py                    # 长期运行(默认推 Server酱)
+    python daily_loop.py                    # 长期运行(默认推 Server酱, 补后复权)
     python daily_loop.py --once             # 立即跑一次今天(手动/测试)
     python daily_loop.py --time 16:00       # 改定时(默认 16:00)
     python daily_loop.py --retry-until 20:00
+    python daily_loop.py --no-hfq           # 不补后复权, 信号用不复权
     python daily_loop.py --tg --pp         # 三个通道都推
     python daily_loop.py --no-sc           # 不推微信(只更新+生成信号)
 """
@@ -102,6 +106,13 @@ def run_update(day: str, output: str) -> int:
     return _run_step("更新", cmd, HERE)
 
 
+def run_update_hfq(day: str, output: str) -> int:
+    """调后复权更新脚本, 把 hfq 目录补到指定日期(信号指标与回测口径一致)。"""
+    cmd = [sys.executable, os.path.join(HERE, "update_a_share_daily_hfq.py"),
+           "--day", day, "--output", output]
+    return _run_step("补hfq", cmd, HERE)
+
+
 def today_data_present(output: str, day: str) -> bool:
     """参考股文件末尾日期 == 今天, 则今天数据已入库。"""
     path = os.path.join(HERE, output, REF_CODE + ".csv")
@@ -122,10 +133,7 @@ def run_signal(data: str, tg_config: str, do_tg: bool,
                pp_config: str = "", do_pp: bool = True,
                sc_config: str = "", do_sc: bool = True) -> int:
     """生成信号, --tg 推 TG 群, --pp/--no-pp 控 PushPlus, --sc/--no-sc 控 Server酱。
-
-    signal_panic 的 --pp/--sc 默认 True, 故这里始终显式传 --pp/--no-pp 与
-    --sc/--no-sc, 让 daily_loop 的开关真正生效。
-    """
+    显式传 --pp/--no-pp 与 --sc/--no-sc, 保证 daily_loop 的通道开关真正生效。"""
     cmd = [sys.executable, os.path.join(HERE, "signal_panic.py"),
            "--data", data, "--tg-config", tg_config,
            "--pp-config", pp_config, "--sc-config", sc_config]
@@ -195,16 +203,31 @@ def do_daily_job(args, day: str) -> str:
         return "pending"
     logging.info("数据已入库: %s 末行=%s (更新耗时 %.1fs)", REF_CODE, day, t_update)
 
+    # ---- 补后复权(hfq): 信号指标与回测口径一致(除权缺口不算超跌) ----
+    signal_data = args.data
+    if args.hfq:
+        t_h = time.time()
+        rc = run_update_hfq(day, args.hfq_out)
+        t_hfq = time.time() - t_h
+        if rc == 0 and today_data_present(args.hfq_out, day):
+            signal_data = args.hfq_out
+            logging.info("后复权已补到 %s (耗时 %.1fs), 信号用 %s",
+                         day, t_hfq, signal_data)
+        else:
+            logging.warning("补后复权失败(退出码 %d)或数据未达 %s, 信号用不复权 %s",
+                            rc, day, args.data)
+            signal_data = args.data
+
     t2 = time.time()
-    rc = run_signal(args.data, args.tg_config, args.tg,
+    rc = run_signal(signal_data, args.tg_config, args.tg,
                     args.pp_config, args.pp,
                     args.sc_config, args.sc)
     t_signal = time.time() - t2
     if rc != 0:
         logging.error("信号失败, 退出码 %d (耗时 %.1fs)", rc, t_signal)
         return "error"
-    logging.info("当日流程完成: 更新 %.1fs + 信号 %.1fs = 总计 %.1fs",
-                 t_update, t_signal, time.time() - t0)
+    logging.info("当日流程完成: 更新 %.1fs + 补hfq %.1fs + 信号 %.1fs = 总计 %.1fs",
+                 t_update, t_hfq if args.hfq else 0, t_signal, time.time() - t0)
     return "ok"
 
 
@@ -294,6 +317,12 @@ def main() -> None:
     ap.add_argument("--output", default="a_share_daily", help="数据目录(默认a_share_daily)")
     ap.add_argument("--data", default="a_share_daily",
                     help="信号用数据目录, 透传给 signal_panic.py(默认同output)")
+    ap.add_argument("--hfq", dest="hfq", action="store_true", default=True,
+                    help="更新后补后复权数据再用它与回测同口径跑信号(默认开; --no-hfq 关)")
+    ap.add_argument("--no-hfq", dest="hfq", action="store_false",
+                    help="不补后复权, 直接用不复权数据跑信号")
+    ap.add_argument("--hfq-out", default="a_share_daily_hfq",
+                    help="后复权数据目录(默认 a_share_daily_hfq)")
     ap.add_argument("--tg-config", default="tg_config.json", help="TG配置文件")
     ap.add_argument("--pp-config", default="pushplus_config.json",
                     help="PushPlus 配置文件")
@@ -327,8 +356,9 @@ def main() -> None:
                                 encoding="utf-8"),
         ],
     )
-    logging.info("daily_loop 启动 | 触发 %s | 重试截止 %s | 数据 %s | TG %s | PushPlus %s | Server酱 %s",
+    logging.info("daily_loop 启动 | 触发 %s | 重试截止 %s | 数据 %s | 补hfq %s | TG %s | PushPlus %s | Server酱 %s",
                  args.time, args.retry_until, args.data,
+                 "开" if args.hfq else "关",
                  "开" if args.tg else "关", "开" if args.pp else "关",
                  "开" if args.sc else "关")
 
