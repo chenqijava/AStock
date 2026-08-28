@@ -58,7 +58,7 @@ def backtest_stock(cfg: dict, code: str, df: pd.DataFrame) -> list:
     ma = close.rolling(cfg["ma_period"]).mean()
     ret_n = close / close.shift(cfg["down_days"]) - 1
     # 超跌 + 当日收阳企稳
-    signal = ((ret_n <= cfg["down_thresh"]) & (close > open_)).fillna(False).to_numpy()
+    signal = ((ret_n <= cfg["down_thresh"]) & (close > open_)).fillna(False).to_numpy().copy()
 
     # 波动率过滤(可选)：max_atr_pct 跳过波动爆表的妖股；min_atr_drop 用 ATR 归一化超跌
     if cfg["max_atr_pct"] > 0 or cfg["min_atr_drop"] > 0:
@@ -67,10 +67,12 @@ def backtest_stock(cfg: dict, code: str, df: pd.DataFrame) -> list:
                         (low - prev_c).abs()], axis=1).max(axis=1)
         atr = tr.ewm(alpha=1.0 / cfg["atr_period"], adjust=False).mean()
         if cfg["max_atr_pct"] > 0:
-            signal &= (atr / close <= cfg["max_atr_pct"]).fillna(False).to_numpy()
+            mask1 = (atr / close <= cfg["max_atr_pct"]).fillna(False).to_numpy()
+            signal = signal & mask1
         if cfg["min_atr_drop"] > 0:
-            signal &= ((close.shift(cfg["down_days"]) - close) / atr
-                       >= cfg["min_atr_drop"]).fillna(False).to_numpy()
+            mask2 = ((close.shift(cfg["down_days"]) - close) / atr
+                     >= cfg["min_atr_drop"]).fillna(False).to_numpy()
+            signal = signal & mask2
 
     stop_pct = cfg["stop_pct"]
     time_stop = cfg["time_stop"]
