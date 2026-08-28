@@ -81,6 +81,20 @@ VOL_N = 8                      # 量比窗口: 信号日成交量 / 前8日均�
 DEFAULT_LEDGER = "panic_positions.json"
 
 
+def _safe_write(text: str) -> None:
+    """把文本写到 stdout，遇到 GBK 终端编码不了的字符(如 ✓)安全降级，不抛异常。
+
+    Windows 控制台默认 GBK 编码，报告里的特殊符号会触发 UnicodeEncodeError 中断推送流程；
+    报告本身会原样推到微信(Server酱/PushPlus 走 UTF-8 不受影响)，这里只是终端显示降级。
+    """
+    enc = getattr(sys.stdout, "encoding", "") or "utf-8"
+    try:
+        sys.stdout.write(text)
+    except UnicodeEncodeError:
+        sys.stdout.write(text.encode(enc, errors="replace").decode(enc, errors="replace"))
+
+
+
 # ---------------------------------------------------------------------------
 # 数据/计算工具
 # ---------------------------------------------------------------------------
@@ -494,7 +508,7 @@ def main() -> None:
         print("[全市场扫描] 主板 %d 只 | 个股层信号 %d 个 (用时 %.0fs)"
               % (len(files), n_sig, time.time() - t0))
         print("[恐慌日判定] %s"
-              % ("是 ✓ (>= %d 个信号)" % args.panic_threshold if is_panic
+              % ("是 [OK] (>= %d 个信号)" % args.panic_threshold if is_panic
                  else "否 (仅 %d 个，未达 %d，不买入)" % (n_sig, args.panic_threshold)))
 
         # ---- 4) 市值过滤 + 排序 + 买入清单 ----
@@ -564,13 +578,13 @@ def main() -> None:
     if args.tg or args.pp or args.sc:
         sys.stdout = _real_stdout
         report = tg_buf.getvalue()
-        sys.stdout.write(report)
+        _safe_write(report)                          # GBK 终端编码不了 ✓ 等, 安全降级
         if args.tg:
             try:
                 import tg_notify
                 tcfg = tg_notify.load_config(args.tg_config)
                 ok = tg_notify.send(report, tcfg, parse_mode="")
-                sys.stdout.write("[TG推送] %s\n" % ("成功 ✓" if ok else "失败"))
+                sys.stdout.write("[TG推送] %s\n" % ("成功 OK" if ok else "失败"))
             except Exception as exc:                    # noqa: BLE001
                 sys.stdout.write("[TG推送] 失败: %s\n" % exc)
         if args.pp:
@@ -578,7 +592,7 @@ def main() -> None:
                 import pushplus_notify
                 pcfg = pushplus_notify.load_config(args.pp_config)
                 ok = pushplus_notify.send(report, pcfg, title="恐慌超跌信号")
-                sys.stdout.write("[PushPlus] %s\n" % ("成功 ✓" if ok else "失败"))
+                sys.stdout.write("[PushPlus] %s\n" % ("成功 OK" if ok else "失败"))
             except Exception as exc:                    # noqa: BLE001
                 sys.stdout.write("[PushPlus] 失败: %s\n" % exc)
         if args.sc:
@@ -586,7 +600,7 @@ def main() -> None:
                 import serverchan_notify
                 scfg = serverchan_notify.load_config(args.sc_config)
                 ok = serverchan_notify.send(report, scfg, title="恐慌超跌信号")
-                sys.stdout.write("[Server酱] %s\n" % ("成功 ✓" if ok else "失败"))
+                sys.stdout.write("[Server酱] %s\n" % ("成功 OK" if ok else "失败"))
             except Exception as exc:                    # noqa: BLE001
                 sys.stdout.write("[Server酱] 失败: %s\n" % exc)
 
