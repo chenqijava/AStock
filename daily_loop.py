@@ -284,7 +284,7 @@ def main() -> None:
                     help="立即跑一次今天的流程后退出(手动/测试)")
     ap.add_argument("--force", action="store_true",
                     help="忽略'今日已完成'状态, 强制重跑(当天数据重更新后重推用)")
-    ap.add_argument("--time", default="16:00", help="每天触发时间 HH:MM(默认16:00)")
+    ap.add_argument("--time", default="07:10", help="每天触发时间 HH:MM(默认07:10)")
     ap.add_argument("--retry-until", default="20:00",
                     help="数据未发布时的重试截止时间 HH:MM(默认20:00)")
     ap.add_argument("--retry-interval", type=int, default=300,
