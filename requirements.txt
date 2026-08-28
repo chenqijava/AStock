@@ -1,0 +1,14 @@
+# AStock 量化策略套件依赖 (Python 3.9)
+# 安装: pip install -r requirements.txt
+
+# ─── 核心: 全策略回测/模拟通用 ──────────────────────
+numpy==2.0.2          # 数值计算, sim_portfolio/strategy_* 全用
+pandas==2.3.3         # 数据处理, 全策略通用
+
+# ─── 数据下载 ───────────────────────────────────────
+baostock==0.9.3       # A股日线/分红/换手率 (download_a_share_daily, download_dividends, signal_panic)
+akshare==1.18.88      # 可转债数据 (download_cb, update_cb)
+pyarrow==21.0.0       # pandas parquet/feather 引擎 (download/update 脚本惰性导入)
+
+# ─── 绘图 (可选) ────────────────────────────────────
+matplotlib==3.9.4     # 净值/回撤绘图 (plot_panic_nav, plot_panic_drawdown)
