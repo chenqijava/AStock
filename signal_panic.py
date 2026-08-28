@@ -24,7 +24,9 @@ signal_panic.py — 恐慌日超跌反弹：实盘交易信号生成器(盘后�
 组合层: 当日全市场(主板)触发个股信号的股票数 >= panic_threshold(60) 才是
   恐慌日，才执行买入；孤立超跌是接飞刀(实测净亏损)一律放弃。
 恐慌选股: 只在恐慌日信号中选流通市值[min_mc,max_mc]=[100,500]亿，
-  同日建仓小市值优先(--mc-order small)。
+  同日建仓默认低放量优先(--vol-order low, 回测最优+137.9%/1.31；
+  回测结论: 放量越猛胜率越低); --vol-order off 退回 --mc-order small
+  小市值优先, high 高放量优先(实验), 大市值优先用 --mc-order large。
 入场 = 次日开盘买入。
 出场:
   反弹: 收盘 > MA(ma_period=20) -> 次日开盘卖出；
@@ -71,7 +73,8 @@ import numpy as np
 import pandas as pd
 
 MAIN_RE = re.compile(r"^(sh\.60|sz\.00)")
-SIGNAL_COLS = ["date", "open", "high", "low", "close", "amount", "turn", "isST"]
+SIGNAL_COLS = ["date", "open", "high", "low", "close", "amount", "turn", "isST", "volume"]
+VOL_N = 8                      # 量比窗口: 信号日成交量 / 前8日均量(与回测 strategy_bounce 一致)
 DEFAULT_LEDGER = "panic_positions.json"
 
 
@@ -151,8 +154,18 @@ def scan_one(args):
                               / df.loc[valid, "turn"]).tail(20))) / 1e8
     else:
         mc = np.nan
+
+    # 盘后量比 = 信号日成交量 / 前VOL_N日均量(与回测 strategy_bounce 口径一致, 无未来函数)
+    vol_n = cfg.get("vol_n", 0)
+    vol = pd.to_numeric(df["volume"], errors="coerce").to_numpy()
+    vol_ratio = float("nan")
+    if vol_n > 0 and n > vol_n and np.all(np.isfinite(vol[-VOL_N:])):
+        v0 = float(vol[-1 - VOL_N:-1].mean())
+        vol_ratio = float(vol[-1]) / v0 if v0 > 0 else float("nan")
+
     return code, {"code": code, "close": float(close.iloc[-1]),
-                  "ret15d": float(ret_n), "atr_pct": atr_pct, "mc": mc}
+                  "ret15d": float(ret_n), "atr_pct": atr_pct, "mc": mc,
+                  "vol_ratio": vol_ratio}
 
 
 def net_round_trip(entry: float, exit_: float, shares: int, cfg: dict) -> float:
@@ -294,8 +307,12 @@ def main() -> None:
     ap.add_argument("--min-mc", type=float, default=100.0)
     ap.add_argument("--max-mc", type=float, default=500.0)
     ap.add_argument("--mc-order", default="small", choices=["random", "small", "large"])
+    ap.add_argument("--vol-order", default="low", choices=["off", "low", "high"],
+                    help="买入排序覆盖为量比: low=低放量优先(默认; 回测最优, 放量越猛胜率越低) | "
+                         "high=高放量优先 | off=不用量比(退回市值排序)")
     # 资金/成本(仅用于建议股数与估算收益)
-    ap.add_argument("--capital", type=float, default=1_000_000)
+    # 回测定稿: 10万本金 / 每笔2万 / 低放量优先(见回测 trades_panic_v15 10w 配置, +137.9%/1.31)
+    ap.add_argument("--capital", type=float, default=100_000)
     ap.add_argument("--notional", type=float, default=20_000)
     ap.add_argument("--commission", type=float, default=0.00025)
     ap.add_argument("--min-commission", type=float, default=5.0)
@@ -310,7 +327,8 @@ def main() -> None:
     cfg = {"down_days": args.down_days, "down_thresh": args.down_thresh,
            "atr_period": args.atr_period, "max_atr_pct": args.max_atr_pct,
            "ma_period": args.ma_period, "stop_pct": args.stop_pct,
-           "time_stop": args.time_stop, "notional": args.notional}
+           "time_stop": args.time_stop, "notional": args.notional,
+           "vol_n": VOL_N if args.vol_order != "off" else 0}
 
     real_dir = args.real_data or args.data
     if not args.real_data and args.data == "a_share_daily_hfq" \
@@ -467,21 +485,30 @@ def main() -> None:
 
         # ---- 4) 市值过滤 + 排序 + 买入清单 ----
         print()
+        # 默认排序文案(与下方实际排序分支保持一致; 非恐慌日不会买入但提示仍打印)
+        order_txt = ("量比从小到大(低放量优先)" if args.vol_order == "low"
+                     else "量比从大到小(高放量优先)" if args.vol_order == "high"
+                     else "小市值优先" if args.mc_order == "small"
+                     else "大市值优先" if args.mc_order == "large"
+                     else "随机")
         if not is_panic:
             print("[买入信号] 今日非恐慌日 -> 无买入，保持空仓观望(只处理上面的卖出)")
         else:
             picks = [s for s in sigs if s["mc"] == s["mc"]
                      and args.min_mc <= s["mc"] <= args.max_mc]
-            if args.mc_order == "small":
+            # 量比排序可覆盖市值排序(回测结论: 放量越猛胜率越低, 低放量优先最优)
+            if args.vol_order == "low":
+                picks.sort(key=lambda s: (s["vol_ratio"], s["mc"]))
+            elif args.vol_order == "high":
+                picks.sort(key=lambda s: (s["vol_ratio"], s["mc"]), reverse=True)
+            elif args.mc_order == "small":
                 picks.sort(key=lambda s: s["mc"])
             elif args.mc_order == "large":
                 picks.sort(key=lambda s: s["mc"], reverse=True)
             else:
                 picks.sort(key=lambda s: s["code"])
-            print("[买入信号 —— 次日开盘买入] %d 个 (市值过滤 [%g, %g] 亿，%s优先)"
-                  % (len(picks), args.min_mc, args.max_mc,
-                     "小市值" if args.mc_order == "small"
-                     else "大市值" if args.mc_order == "large" else "随机"))
+            print("[买入信号 —— 次日开盘买入] %d 个 (市值过滤 [%g, %g] 亿，%s)"
+                  % (len(picks), args.min_mc, args.max_mc, order_txt))
             rows = []
             for i, s in enumerate(picks, 1):
                 rp = real_price(s["code"], signal_date)
@@ -493,13 +520,15 @@ def main() -> None:
                 if rp and pre and pre > 0 and px >= round(pre * 1.1, 2) - 0.001:
                     limit_note = "  !! 今日涨停，明日可能买不进"
                 mc_txt = "%.0f" % s["mc"] if s["mc"] == s["mc"] else "--"
-                print("  %2d. %-11s 现价%.3f 15日跌%6.1f%% ATR%%%.1f 市值%5s亿  建议%d股 约%.0f元%s"
+                vr_txt = "%.2f" % s["vol_ratio"] if s["vol_ratio"] == s["vol_ratio"] else "--"
+                print("  %2d. %-11s 现价%.3f 15日跌%6.1f%% ATR%%%.1f 量比%5s 市值%5s亿  建议%d股 约%.0f元%s"
                       % (i, s["code"], px, s["ret15d"] * 100, s["atr_pct"] * 100,
-                         mc_txt, shares, cost, limit_note))
+                         vr_txt, mc_txt, shares, cost, limit_note))
                 rows.append({"date": signal_date, "code": s["code"],
                              "close": round(px, 3),
                              "ret15d": round(s["ret15d"], 4),
                              "atr_pct": round(s["atr_pct"], 4),
+                             "vol_ratio": round(s["vol_ratio"], 2) if s["vol_ratio"] == s["vol_ratio"] else None,
                              "mc": round(s["mc"], 1) if s["mc"] == s["mc"] else None,
                              "shares": shares, "est_cost": round(cost, 0),
                              "limit_note": limit_note.strip()})
@@ -512,7 +541,7 @@ def main() -> None:
         print("提示: 资金%.0f万 / 每笔%.1f万 -> 最多约 %d 个并发持仓；"
               % (args.capital / 1e4, args.notional / 1e4,
                  max(1, int(args.capital // args.notional))))
-        print("      恐慌日信号多于可买数量时按上面排序(小市值优先)依次买入。")
+        print("      恐慌日信号多于可买数量时按上面排序(%s)依次买入。" % order_txt)
     else:
         print()
         print("(--list 模式，未扫描全市场，无买入信号)")

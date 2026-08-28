@@ -160,6 +160,8 @@ def main() -> None:
                     help="仅选流通市值<=该值的信号(亿元, 默认500；0=无上界)")
     ap.add_argument("--mc-order", default="small", choices=["random", "small", "large"],
                     help="恐慌日同日建仓顺序: small=小市值优先(默认) | large=大市值优先 | random=随机")
+    ap.add_argument("--vol-order", default="off", choices=["off", "low", "high"],
+                    help="按量比覆盖市值排序: low=低放量优先(温和放量胜率更高) | high=高放量优先 | off=只用市值排序(默认)")
     # 组合模拟
     ap.add_argument("--capital", type=float, default=1_000_000)
     ap.add_argument("--notional", type=float, default=20_000)
@@ -175,14 +177,15 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-5s | %(message)s")
 
+    need_vol = (args.vol_min > 0 or args.vol_max > 0 or args.vol_order != "off")
     cfg = {
         "down_days": args.down_days, "down_thresh": args.down_thresh,
         "ma_period": args.ma_period, "stop_pct": args.stop_pct,
         "time_stop": args.time_stop, "include_st": False,
         "atr_period": args.atr_period,
         "min_atr_drop": 0.0, "max_atr_pct": args.max_atr_pct,
-        "vol_n": 8 if (args.vol_min > 0 or args.vol_max > 0) else 0,
-        "usecols": USECOLS_VOL if (args.vol_min > 0 or args.vol_max > 0) else USECOLS,
+        "vol_n": 8 if need_vol else 0,
+        "usecols": USECOLS_VOL if need_vol else USECOLS,
         "capital": args.capital, "commission": args.commission,
         "min_commission": args.min_commission, "stamp": args.stamp,
         "slip": args.slip, "lot": 100,
@@ -267,11 +270,20 @@ def main() -> None:
     print(f"组合模拟(资金 {args.capital/1e4:.0f}万, 每笔 {args.notional/1e4:.1f}万)")
     print("=" * 62)
     priority_asc = False
-    if args.mc_order != "random":
+    sort_kind = "随机"
+    if args.vol_order != "off":
+        # 量比维度覆盖市值排序(回测结论: 温和放量1.5~3x胜率/净收益最高, 高放量最差)
+        panic["priority"] = panic["vol_ratio"]
+        priority_asc = args.vol_order == "low"
+        sort_kind = ("低放量优先(温和放量胜率更高)" if priority_asc
+                     else "高放量优先(实验)")
+    elif args.mc_order != "random":
         panic["priority"] = panic["mc"]
         priority_asc = args.mc_order == "small"
+        sort_kind = ("小市值优先" if priority_asc else "大市值优先")
         print(f"建仓顺序: {'市值从小到大优先' if priority_asc else '市值从大到小优先'}"
               f"(资金不足时{'小' if priority_asc else '大'}市值先拿仓位)")
+    print(f"建仓排序: {sort_kind}(资金不足时优先先拿仓位)")
     res = simulate(panic, args.data, args.capital, args.notional,
                    args.commission, args.min_commission, args.stamp, args.slip,
                    priority_asc=priority_asc)

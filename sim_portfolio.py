@@ -33,8 +33,14 @@ def simulate(trades: pd.DataFrame, data_dir: str, capital: float, notional: floa
              commission: float = 0.00025, min_commission: float = 5.0,
              stamp: float = 0.0005, slip: float = 0.001,
              seed: int = 20260827, priority_asc: bool = False,
-             max_exposure: float = None) -> dict:
+             max_exposure: float = None, calendar_code: str = "sh.600000",
+             mode: str = "notional") -> dict:
     """对交易明细做逐日盯市净值模拟。
+
+    mode 建仓模式:
+      "notional"  : 每笔固定名义本金 notional(A股整手100股) —— 原始默认
+      "lot"       : 每信号只买 1 手(100股), 资金充足即建仓, 不加仓
+      "roundrobin": 1 手起步, 资金按便宜优先循环加仓, 直到买不起任何 1 手
 
     返回 dict：dates/nav/n_open(日频序列)，total_ret/cagr/mdd/sharpe，
     funded/skipped/fund_rate，max_open/avg_open/final_open，ret_taken/ret_skipped。
@@ -53,7 +59,7 @@ def simulate(trades: pd.DataFrame, data_dir: str, capital: float, notional: floa
     else:
         trades = trades.sort_values(["entry_date", "_rk"]).reset_index(drop=True)
 
-    cal = sorted(pd.read_csv(os.path.join(data_dir, "sh.600000.csv"),
+    cal = sorted(pd.read_csv(os.path.join(data_dir, calendar_code + ".csv"),
                              usecols=["date"])["date"].tolist())
     di = {d: i for i, d in enumerate(cal)}
     n = len(cal)
@@ -94,44 +100,106 @@ def simulate(trades: pd.DataFrame, data_dir: str, capital: float, notional: floa
             else:
                 keep.append(p)
         open_pos = keep
+
         # 2) 建仓
+        day_trades = []
         while ei < len(trades) and trades.loc[ei, "entry_date"] == d:
             t = trades.loc[ei]
             ei += 1
-            ep = float(t["entry_price"])
-            if not (ep > 0):
-                skipped += 1
-                ret_skipped.append(float(t["ret"]))
-                continue
-            shares = int(notional // (ep * 100)) * 100
-            if shares <= 0:
-                skipped += 1
-                ret_skipped.append(float(t["ret"]))
-                continue
-            cost = shares * ep
-            fee = max(minc, cost * comm)
-            if cash < cost + fee:
-                skipped += 1
-                ret_skipped.append(float(t["ret"]))
-                continue
-            if max_exposure and (pos_cost + cost) / capital > max_exposure:
-                skipped += 1
-                ret_skipped.append(float(t["ret"]))
-                continue
-            cash -= cost + fee
-            pos_cost += cost
-            ret_taken.append(float(t["ret"]))
-            ex = di.get(str(t["exit_date"]), n - 1)
-            pos = {"code": str(t["code"]), "shares": shares,
-                   "exit_price": float(t["exit_price"]), "exit_idx": ex, "cost": cost}
-            open_pos.append(pos)
-            n_taken += 1
-            if ex == i:               # 同日平仓(跳空止损)
-                gross = shares * float(t["exit_price"])
-                s_fee = max(minc, gross * comm) + gross * stamp_ + gross * slip_
-                cash += gross - s_fee
-                pos_cost -= cost
-                open_pos.pop()
+            day_trades.append(t)
+
+        if day_trades:
+            if mode in ("lot", "roundrobin"):
+                shares_per_trade = [0] * len(day_trades)
+                # 循环加仓: 每次给所有信号各加1手, 直到资金不够买任何1手
+                # 先计算每手成本排序, 优先买股价低的信号(资金利用率更高)
+                lot_cost = []
+                for idx, t in enumerate(day_trades):
+                    ep = float(t["entry_price"])
+                    if not (ep > 0):
+                        continue
+                    lot_cost.append((idx, ep * 100.0))  # 1手 = 100股
+                lot_cost.sort(key=lambda x: x[1])
+                # 轮次加仓: lot 模式只加 1 轮(每信号 1 手); roundrobin 延续到买不起
+                while True:
+                    added_any = False
+                    for idx, _cost_1lot in lot_cost:
+                        ep = float(day_trades[idx]["entry_price"])
+                        if mode == "lot" and shares_per_trade[idx] > 0:
+                            continue                      # 每人只买1手
+                        extra_cost = 100 * ep
+                        extra_fee = max(minc, extra_cost * comm)
+                        need = extra_cost + extra_fee
+                        if cash < need:
+                            continue
+                        if max_exposure and (pos_cost + extra_cost) / capital > max_exposure:
+                            continue
+                        cash -= need
+                        pos_cost += extra_cost
+                        shares_per_trade[idx] += 100
+                        added_any = True
+                        if shares_per_trade[idx] == 100:
+                            n_taken += 1
+                            ret_taken.append(float(day_trades[idx]["ret"]))
+                    if not added_any:
+                        break
+                    if mode == "lot":
+                        break
+                for idx, t in enumerate(day_trades):
+                    if shares_per_trade[idx] == 0:
+                        skipped += 1
+                        ret_skipped.append(float(t["ret"]))
+                        continue
+                    ep = float(t["entry_price"])
+                    shares = shares_per_trade[idx]
+                    cost = shares * ep
+                    ex = di.get(str(t["exit_date"]), n - 1)
+                    pos = {"code": str(t["code"]), "shares": shares,
+                           "exit_price": float(t["exit_price"]), "exit_idx": ex, "cost": cost}
+                    open_pos.append(pos)
+                    if ex == i:               # 同日平仓(跳空止损)
+                        gross = shares * float(t["exit_price"])
+                        s_fee = max(minc, gross * comm) + gross * stamp_ + gross * slip_
+                        cash += gross - s_fee
+                        pos_cost -= cost
+                        open_pos.pop()
+            else:  # notional
+                for t in day_trades:
+                    ep = float(t["entry_price"])
+                    if not (ep > 0):
+                        skipped += 1
+                        ret_skipped.append(float(t["ret"]))
+                        continue
+                    shares = int(notional // (ep * 100)) * 100
+                    if shares <= 0:
+                        skipped += 1
+                        ret_skipped.append(float(t["ret"]))
+                        continue
+                    cost = shares * ep
+                    fee = max(minc, cost * comm)
+                    if cash < cost + fee:
+                        skipped += 1
+                        ret_skipped.append(float(t["ret"]))
+                        continue
+                    if max_exposure and (pos_cost + cost) / capital > max_exposure:
+                        skipped += 1
+                        ret_skipped.append(float(t["ret"]))
+                        continue
+                    cash -= cost + fee
+                    pos_cost += cost
+                    ret_taken.append(float(t["ret"]))
+                    ex = di.get(str(t["exit_date"]), n - 1)
+                    pos = {"code": str(t["code"]), "shares": shares,
+                           "exit_price": float(t["exit_price"]), "exit_idx": ex, "cost": cost}
+                    open_pos.append(pos)
+                    n_taken += 1
+                    if ex == i:               # 同日平仓(跳空止损)
+                        gross = shares * float(t["exit_price"])
+                        s_fee = max(minc, gross * comm) + gross * stamp_ + gross * slip_
+                        cash += gross - s_fee
+                        pos_cost -= cost
+                        open_pos.pop()
+
         # 3) 盯市
         mv = 0.0
         for p in open_pos:
