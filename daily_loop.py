@@ -76,14 +76,26 @@ def is_trading_day(day: str) -> bool:
         return None
 
 
+def _run_step(name: str, cmd: list, cwd: str) -> int:
+    """跑一个子进程, 实时透传 stdout/stderr 到日志(带 [name] 前缀), 返回退出码。"""
+    logging.info("[%s] 开始: %s", name, " ".join(cmd))
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace",
+                            bufsize=1)
+    for line in proc.stdout:                       # 实时逐行透传
+        logging.info("[%s] %s", name, line.rstrip())
+    proc.wait()
+    logging.info("[%s] 结束, 退出码 %d", name, proc.returncode)
+    return proc.returncode
+
+
 def run_update(day: str, output: str) -> int:
     """调更新脚本拉取指定日期, 返回子进程退出码。"""
     cmd = [sys.executable, os.path.join(HERE, "update_a_share_daily.py"),
            "--day", day, "--output", output]
-    logging.info("更新数据: %s", " ".join(cmd))
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    proc = subprocess.run(cmd, cwd=HERE, env=env)
-    return proc.returncode
+    return _run_step("更新", cmd, HERE)
 
 
 def today_data_present(output: str, day: str) -> bool:
@@ -108,10 +120,7 @@ def run_signal(data: str, tg_config: str, do_tg: bool) -> int:
            "--data", data, "--tg-config", tg_config]
     if do_tg:
         cmd.append("--tg")
-    logging.info("生成信号: %s", " ".join(cmd))
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    proc = subprocess.run(cmd, cwd=HERE, env=env)
-    return proc.returncode
+    return _run_step("信号", cmd, HERE)
 
 
 def push_notice(tg_config: str, text: str) -> None:
@@ -129,27 +138,41 @@ def push_notice(tg_config: str, text: str) -> None:
 def do_daily_job(args, day: str) -> str:
     """跑一天的完整流程。返回状态: ok / pending(数据未发布, 稍后重试) /
     error(更新失败) / notrade(非交易日)。"""
+    t0 = time.time()
+    logging.info("=" * 60)
+    logging.info("开始执行 %s 当日流程", day)
+
     if args.check_trade:
         tr = is_trading_day(day)
         if tr is False:
-            logging.info("%s 非交易日, 跳过", day)
+            logging.info("%s 非交易日, 跳过 (耗时 %.1fs)", day, time.time() - t0)
             return "notrade"
         if tr is None:
             logging.info("无法确认交易日, 按交易日流程处理")
+        else:
+            logging.info("交易日确认: 是 (耗时 %.1fs)", time.time() - t0)
 
+    t1 = time.time()
     rc = run_update(day, args.output)
+    t_update = time.time() - t1
     if rc != 0:
-        logging.error("更新脚本退出码 %d", rc)
+        logging.error("更新失败, 退出码 %d (耗时 %.1fs)", rc, t_update)
         return "error"
 
     if not today_data_present(args.output, day):
-        logging.info("今天数据尚未发布(参考股未到 %s), 稍后重试", day)
+        logging.info("今天数据尚未发布(参考股 %s 未到 %s), 稍后重试 (更新耗时 %.1fs)",
+                     REF_CODE, day, t_update)
         return "pending"
+    logging.info("数据已入库: %s 末行=%s (更新耗时 %.1fs)", REF_CODE, day, t_update)
 
+    t2 = time.time()
     rc = run_signal(args.data, args.tg_config, args.tg)
+    t_signal = time.time() - t2
     if rc != 0:
-        logging.error("信号脚本退出码 %d", rc)
+        logging.error("信号失败, 退出码 %d (耗时 %.1fs)", rc, t_signal)
         return "error"
+    logging.info("当日流程完成: 更新 %.1fs + 信号 %.1fs = 总计 %.1fs",
+                 t_update, t_signal, time.time() - t0)
     return "ok"
 
 
@@ -170,18 +193,19 @@ def loop(args) -> None:
 
         if state.get("done") == today and not args.force:
             if args.once:
-                logging.info("今天已完成, 退出(--once; 用 --force 可强制重跑)")
+                logging.info("今天已完成(%s), 退出(--force 可强制重跑)", state.get("note", ""))
                 return
             # 今天已做完, 睡到明天触发
             target = _dt.datetime.combine(now.date() + _dt.timedelta(days=1),
                                           args.trigger)
             wait = (target - now).total_seconds()
-            logging.info("今日已完成, 距下次触发 %s 还有 %d 分钟",
+            logging.info("今日已完成, 睡到明天 %s (距 %d 分钟)",
                          target.strftime("%Y-%m-%d %H:%M"), wait // 60)
             time.sleep(min(wait, 3600))
             continue
 
-        if now.time() >= args.trigger:
+        # --once: 立即执行, 不等触发点; 常驻: 等到触发点
+        if args.once or now.time() >= args.trigger:
             day = today
             result = do_daily_job(args, day)
             if result == "ok":
@@ -189,22 +213,33 @@ def loop(args) -> None:
                 if args.once:
                     return
             elif result in ("pending", "error"):
-                if now.time() > args.retry_until:
-                    push_notice(args.tg_config,
-                                "⚠️ 今日流程未完成(%s): %s 数据未入库或更新失败, 请手动处理"
-                                % (day, "当日数据未发布" if result == "pending" else "更新失败"))
+                if args.once or now.time() > args.retry_until:
+                    # --once 模式不重试, 直接报完退出; 常驻模式超重试截止则报
+                    if args.tg:
+                        push_notice(args.tg_config,
+                                    "⚠️ 今日流程未完成(%s): %s 数据未入库或更新失败, 请手动处理"
+                                    % (day, "当日数据未发布" if result == "pending" else "更新失败"))
+                    else:
+                        logging.info("未推送(--no-tg): 今日流程未完成(%s, %s)",
+                                     day, result)
                     mark_done(args, day, result)
                     if args.once:
                         return
                 else:
-                    logging.info("%d 秒后重试(数据未发布或更新失败)", args.retry_interval)
+                    logging.info("%d 秒后重试(数据未发布或更新失败, 截止 %s)",
+                                 args.retry_interval, args.retry_until)
                     time.sleep(args.retry_interval)
                     continue
             else:                             # notrade
                 mark_done(args, day, "notrade")
                 if args.once:
                     return
-        time.sleep(args.check_interval)
+        else:
+            # 常驻模式未到触发点, 短睡等待
+            target = _dt.datetime.combine(now.date(), args.trigger)
+            wait = (target - now).total_seconds()
+            logging.info("等待触发点 %s (还有 %d 分钟)", args.time, wait // 60)
+            time.sleep(min(wait, 3600))
 
 
 def main() -> None:
