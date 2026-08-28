@@ -53,6 +53,8 @@ stop_price(建仓时按当时 stop_pct 锁定)。出场判定按台账+最新数
     python signal_panic.py --list                       # 查看当前持仓与浮盈亏
     python signal_panic.py --buy-fills fb.csv --sell-fills fs.csv  # 回填当日成交
     python signal_panic.py --panic-threshold 50 --capital 2000000
+    python signal_panic.py --tg            # 报告推到 Telegram 群(默认只推微信)
+    python signal_panic.py --no-pp         # 不推微信(只本地输出)
 
 买入成交CSV(fills_buy.csv, 每行): date,code,price[,shares]
    date=成交日(默认最新交易日), price=实际成交价, shares 缺省按每笔 notional 算。
@@ -289,6 +291,11 @@ def main() -> None:
     ap.add_argument("--list", action="store_true", help="只查看持仓与浮盈亏，不生成信号")
     ap.add_argument("--tg", action="store_true", help="跑完把报告推送到 Telegram 群(tg_config.json)")
     ap.add_argument("--tg-config", default="tg_config.json", help="TG 配置文件(json)")
+    ap.add_argument("--pp", dest="pp", action="store_true", default=True,
+                    help="跑完把报告推送到微信(PushPlus, 默认开; --no-pp 关)")
+    ap.add_argument("--no-pp", dest="pp", action="store_false",
+                    help="不推送到微信(PushPlus)")
+    ap.add_argument("--pp-config", default="pushplus_config.json", help="PushPlus 配置文件(json)")
     ap.add_argument("--buy-fills", default=None, help="买入成交CSV(date,code,price[,shares])")
     ap.add_argument("--sell-fills", default=None, help="卖出成交CSV(date,code,price[,reason])")
     ap.add_argument("--universe", default="main", choices=["main", "all"])
@@ -363,9 +370,9 @@ def main() -> None:
             return None
         return float(row["close"].iloc[-1]), float(row["preclose"].iloc[-1])
 
-    # --tg: 捕获报告文本，跑完打印到终端并推送到 Telegram 群
+    # --tg / --pp: 捕获报告文本，跑完打印到终端并推送(Telegram 群 / 微信)
     tg_buf = None
-    if args.tg:
+    if args.tg or args.pp:
         tg_buf = io.StringIO()
         _real_stdout = sys.stdout
         sys.stdout = tg_buf
@@ -546,18 +553,27 @@ def main() -> None:
         print()
         print("(--list 模式，未扫描全市场，无买入信号)")
 
-    # ---- 5) --tg: 还原 stdout，打印报告并推送到 Telegram ----
-    if args.tg:
+    # ---- 5) --tg / --pp: 还原 stdout，打印报告并推送 ----
+    if args.tg or args.pp:
         sys.stdout = _real_stdout
         report = tg_buf.getvalue()
         sys.stdout.write(report)
-        try:
-            import tg_notify
-            tcfg = tg_notify.load_config(args.tg_config)
-            ok = tg_notify.send(report, tcfg, parse_mode="")
-            sys.stdout.write("[TG推送] %s\n" % ("成功 ✓" if ok else "失败"))
-        except Exception as exc:                        # noqa: BLE001
-            sys.stdout.write("[TG推送] 失败: %s\n" % exc)
+        if args.tg:
+            try:
+                import tg_notify
+                tcfg = tg_notify.load_config(args.tg_config)
+                ok = tg_notify.send(report, tcfg, parse_mode="")
+                sys.stdout.write("[TG推送] %s\n" % ("成功 ✓" if ok else "失败"))
+            except Exception as exc:                    # noqa: BLE001
+                sys.stdout.write("[TG推送] 失败: %s\n" % exc)
+        if args.pp:
+            try:
+                import pushplus_notify
+                pcfg = pushplus_notify.load_config(args.pp_config)
+                ok = pushplus_notify.send(report, pcfg, title="恐慌超跌信号")
+                sys.stdout.write("[微信推送] %s\n" % ("成功 ✓" if ok else "失败"))
+            except Exception as exc:                    # noqa: BLE001
+                sys.stdout.write("[微信推送] 失败: %s\n" % exc)
 
 
 if __name__ == "__main__":

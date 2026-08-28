@@ -2,6 +2,9 @@
 # TG bot token + chat_id（敏感！）
 tg_config.json
 
+# PushPlus token（微信推送, 敏感！）
+pushplus_config.json
+
 # ─── 每日循环状态与日志 ────────────────────────────────
 daily_loop_state.json
 daily_loop.log

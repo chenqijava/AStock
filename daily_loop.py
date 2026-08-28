@@ -1,25 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-daily_loop.py — 实盘每日定时循环: 每天 16:00 自动更新数据并推送 TG 信号
+daily_loop.py — 实盘每日定时循环: 每天 16:00 自动更新数据并推送信号
 ======================================================================
 
 到点(默认 16:00)依次执行:
   1. 更新数据   update_a_share_daily.py --day <今天> --output a_share_daily
                 (今天数据若尚未发布, 每 --retry-interval 重试, 最迟 --retry-until)
   2. 验证今天数据已入库(以 sh.600000.csv 末尾日期为准)
-  3. 生成信号并推送   signal_panic.py --tg    (完整报告推到 TG 群)
+  3. 生成信号并推送   signal_panic.py --tg [--pp]  (报告推到 TG 群 / 微信)
   4. 记录"今日已完成", 睡到明天
 
 非交易日自动跳过(不发消息)。已完成日期存 daily_loop_state.json,
 重启不重复执行。适合开机自启 / Windows 任务计划长时间挂着。
 
+推送通道: 微信 PushPlus(默认开, --no-pp 关) + TG(默认关, --tg 开)。
+两者可同时开, 报告与异常通知会各推一份。
+
 用法
 ----
-    python daily_loop.py                    # 长期运行(建议开机自启)
+    python daily_loop.py                    # 长期运行(默认推微信)
     python daily_loop.py --once             # 立即跑一次今天(手动/测试)
     python daily_loop.py --time 16:00       # 改定时(默认 16:00)
     python daily_loop.py --retry-until 20:00
-    python daily_loop.py --once --no-tg     # 只更新+生成信号, 不推送
+    python daily_loop.py --tg              # 微信 + TG 都推
+    python daily_loop.py --no-pp           # 不推微信(只更新+生成信号)
 """
 import argparse
 import datetime as _dt
@@ -114,25 +118,41 @@ def today_data_present(output: str, day: str) -> bool:
     return False
 
 
-def run_signal(data: str, tg_config: str, do_tg: bool) -> int:
-    """生成信号, --tg 时把报告推到 TG 群。"""
+def run_signal(data: str, tg_config: str, do_tg: bool,
+               pp_config: str = "", do_pp: bool = True) -> int:
+    """生成信号, --tg 时把报告推到 TG 群, --pp/--no-pp 控微信(PushPlus)。
+
+    signal_panic 的 --pp 默认 True, 故这里始终显式传 --pp 或 --no-pp,
+    让 daily_loop 的开关真正生效。
+    """
     cmd = [sys.executable, os.path.join(HERE, "signal_panic.py"),
-           "--data", data, "--tg-config", tg_config]
+           "--data", data, "--tg-config", tg_config,
+           "--pp-config", pp_config]
     if do_tg:
         cmd.append("--tg")
+    cmd.append("--pp" if do_pp else "--no-pp")
     return _run_step("信号", cmd, HERE)
 
 
-def push_notice(tg_config: str, text: str) -> None:
-    """发一条纯文本通知到 TG 群(更新失败/数据未发布等)。"""
-    try:
-        sys.path.insert(0, HERE)
-        import tg_notify
-        cfg = tg_notify.load_config(os.path.join(HERE, tg_config))
-        ok = tg_notify.send(text, cfg, parse_mode="")
-        logging.info("TG 通知%s: %s", "成功" if ok else "失败", text)
-    except Exception as exc:                  # noqa: BLE001
-        logging.error("TG 通知失败: %s", exc)
+def push_notice(args, text: str) -> None:
+    """发一条纯文本通知到 TG 群和/或微信(更新失败/数据未发布等)。"""
+    sys.path.insert(0, HERE)
+    if args.tg:
+        try:
+            import tg_notify
+            cfg = tg_notify.load_config(os.path.join(HERE, args.tg_config))
+            ok = tg_notify.send(text, cfg, parse_mode="")
+            logging.info("TG 通知%s: %s", "成功" if ok else "失败", text)
+        except Exception as exc:              # noqa: BLE001
+            logging.error("TG 通知失败: %s", exc)
+    if args.pp:
+        try:
+            import pushplus_notify
+            cfg = pushplus_notify.load_config(os.path.join(HERE, args.pp_config))
+            ok = pushplus_notify.send(text, cfg, title="每日流程异常")
+            logging.info("微信通知%s: %s", "成功" if ok else "失败", text)
+        except Exception as exc:              # noqa: BLE001
+            logging.error("微信通知失败: %s", exc)
 
 
 def do_daily_job(args, day: str) -> str:
@@ -166,7 +186,8 @@ def do_daily_job(args, day: str) -> str:
     logging.info("数据已入库: %s 末行=%s (更新耗时 %.1fs)", REF_CODE, day, t_update)
 
     t2 = time.time()
-    rc = run_signal(args.data, args.tg_config, args.tg)
+    rc = run_signal(args.data, args.tg_config, args.tg,
+                    args.pp_config, args.pp)
     t_signal = time.time() - t2
     if rc != 0:
         logging.error("信号失败, 退出码 %d (耗时 %.1fs)", rc, t_signal)
@@ -215,12 +236,12 @@ def loop(args) -> None:
             elif result in ("pending", "error"):
                 if args.once or now.time() > args.retry_until:
                     # --once 模式不重试, 直接报完退出; 常驻模式超重试截止则报
-                    if args.tg:
-                        push_notice(args.tg_config,
+                    if args.tg or args.pp:
+                        push_notice(args,
                                     "⚠️ 今日流程未完成(%s): %s 数据未入库或更新失败, 请手动处理"
                                     % (day, "当日数据未发布" if result == "pending" else "更新失败"))
                     else:
-                        logging.info("未推送(--no-tg): 今日流程未完成(%s, %s)",
+                        logging.info("未推送(--no-tg --no-pp): 今日流程未完成(%s, %s)",
                                      day, result)
                     mark_done(args, day, result)
                     if args.once:
@@ -263,13 +284,19 @@ def main() -> None:
     ap.add_argument("--data", default="a_share_daily",
                     help="信号用数据目录, 透传给 signal_panic.py(默认同output)")
     ap.add_argument("--tg-config", default="tg_config.json", help="TG配置文件")
+    ap.add_argument("--pp-config", default="pushplus_config.json",
+                    help="PushPlus 配置文件")
     ap.add_argument("--state", default=STATE_FILE, help="状态文件")
-    ap.add_argument("--no-tg", action="store_true", help="不推送TG(只更新+生成信号)")
+    ap.add_argument("--tg", action="store_true",
+                    help="同时推送到 Telegram(默认关; 微信默认开)")
+    ap.add_argument("--pp", dest="pp", action="store_true", default=True,
+                    help="推送到微信(PushPlus, 默认开; --no-pp 关)")
+    ap.add_argument("--no-pp", dest="pp", action="store_false",
+                    help="不推送到微信(只更新+生成信号)")
     ap.add_argument("--no-trade-check", action="store_true",
                     help="不查交易日历, 无条件按交易日处理(周末会反复重试)")
     args = ap.parse_args()
 
-    args.tg = not args.no_tg
     args.check_trade = not args.no_trade_check
     args.trigger = parse_hhmm(args.time)
     args.retry_until = parse_hhmm(args.retry_until)
@@ -283,9 +310,9 @@ def main() -> None:
                                 encoding="utf-8"),
         ],
     )
-    logging.info("daily_loop 启动 | 触发 %s | 重试截止 %s | 数据 %s | TG推送 %s",
+    logging.info("daily_loop 启动 | 触发 %s | 重试截止 %s | 数据 %s | TG推送 %s | 微信推送 %s",
                  args.time, args.retry_until, args.data,
-                 "开" if args.tg else "关")
+                 "开" if args.tg else "关", "开" if args.pp else "关")
 
     try:
         loop(args)
