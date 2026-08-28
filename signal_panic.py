@@ -538,6 +538,10 @@ def main() -> None:
             print("[买入信号 —— 次日开盘买入] %d 个 (市值过滤 [%g, %g] 亿，%s)"
                   % (len(picks), args.min_mc, args.max_mc, order_txt))
             rows = []
+            # Markdown 表格(微信 Server酱/PushPlus 支持 Markdown 渲染; TG 纯文本亦可见)
+            print()
+            print("| # | 代码 | 现价 | 15日跌 | ATR% | 量比 | 市值(亿) | 建议股数 | 约金额 | 备注 |")
+            print("|---:|:---|---:|---:|---:|---:|---:|---:|---:|:---|")
             for i, s in enumerate(picks, 1):
                 rp = real_price(s["code"], signal_date)
                 px = rp[0] if rp else s["close"]
@@ -546,10 +550,10 @@ def main() -> None:
                 cost = shares * px
                 limit_note = ""
                 if rp and pre and pre > 0 and px >= round(pre * 1.1, 2) - 0.001:
-                    limit_note = "  !! 今日涨停，明日可能买不进"
+                    limit_note = "涨停,明日可能买不进"
                 mc_txt = "%.0f" % s["mc"] if s["mc"] == s["mc"] else "--"
                 vr_txt = "%.2f" % s["vol_ratio"] if s["vol_ratio"] == s["vol_ratio"] else "--"
-                print("  %2d. %-11s 现价%.3f 15日跌%6.1f%% ATR%%%.1f 量比%5s 市值%5s亿  建议%d股 约%.0f元%s"
+                print("| %d | %s | %.3f | %.1f%% | %.1f | %s | %s | %d | %.0f | %s |"
                       % (i, s["code"], px, s["ret15d"] * 100, s["atr_pct"] * 100,
                          vr_txt, mc_txt, shares, cost, limit_note))
                 rows.append({"date": signal_date, "code": s["code"],
